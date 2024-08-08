@@ -1,0 +1,115 @@
+#!/bin/sh
+##
+## This file is part of the sigrok-util project.
+##
+## Copyright (C) 2024 Giles314 <pch@laposte.net>
+##
+## This program is free software; you can redistribute it and/or modify
+## it under the terms of the GNU General Public License as published by
+## the Free Software Foundation; either version 2 of the License, or
+## (at your option) any later version.
+##
+## This program is distributed in the hope that it will be useful,
+## but WITHOUT ANY WARRANTY; without even the implied warranty of
+## MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+## GNU General Public License for more details.
+##
+## You should have received a copy of the GNU General Public License
+## along with this program; if not, see <http://www.gnu.org/licenses/>.
+##
+
+## .cmn-source must be sourced in the different build scripts
+## It defines a function that helps working with forked repositories
+## By exporting SIGROK_REPO_BASEURL defining
+## the root of these repositories, this function fetches
+## ${SIGROK_REPO_BASEURL}/${repo-name} repository instead of
+## git://sigrok.org/${repo-name}
+## If the forked repository does not exist falls back to sigrok repo.
+
+## It also add a capability to configue incremental building
+## This mode does not try to rebuild all but just to build what has failed
+
+echo "Loading utility functions from .cmn-sources"
+
+# LoadAndUpdateDir perform the initial and common part of getting and compiling a repository
+# The repository component generation specificities must follow the call to this procedure
+# $1: The repository short name
+# If $BUILD_IN_BUILD is defined will create a build directory in the loaded repo
+LoadAndUpdateDir() {
+
+  local repo_name="$1"
+  local alt_build="$2"
+  local repo_base_url="${SIGROK_REPO_BASEURL:-${REPO_BASE}}"
+  local repo_url="${repo_base_url}/${repo_name}"
+
+  if [ -t 1 ] ; then echo -n "\033[92m" ; fi
+  echo "Component ${repo_name}"
+  if [ -t 1 ] ; then echo -n "\033[0m" ;fi
+  
+  # Check whether the computed URL is a valid GIT repository
+  if ! git ls-remote "${repo_url}" <&- >/dev/null 2>&1 ; then
+	  # If not, if it wasn't the default repository fall back to default
+	  # (This allows to have only few local repositories keeping default for others)
+    if [ ! "${repo_url}" = "${REPO_BASE}" ]; then
+	    echo "The repository ${repo_url} does not exist use default ${REPO_BASE}"
+		  repo_url="${REPO_BASE}/${repo_name}"
+	  fi
+  fi
+  
+  # Verify whether the directory is already a Git repository
+  if [ -d "${repo_name}/.git" ]; then
+    # Get the local Git Repository's remote repository URL
+    cd ${repo_name}
+    local remote_url=$(git remote get-url origin 2>/dev/null)
+
+    # This is matching expected repository
+    if [ "$remote_url" = "$repo_url" ]; then
+      # Do a fech operation to check whether a new change has been missed
+      local fetch_result=$(git fetch origin)
+	    # Trim any white spaces 
+	    fetch_result="${fetch_result#"${fetch_result%%[![:space:]]*}"}"
+      if [ -n "$fetch_result" ]; then
+        echo -e "\033[33mNew changes exist in repository '${repo_name}'.\033[0m"
+      	exit 1
+      fi
+    else
+      echo "The directory '${repo_name}' contains a clone of '${remote_url}' instead of '${repo_url}'"
+      exit 1
+    fi
+  else
+    if [ -d ${repo_name} ]; then
+      rm -rf ${repo_name}
+    fi
+    # Clone the repository and add its build directory
+    ${GIT_CLONE} "$repo_url" 
+    cd ${repo_name}
+  fi
+  if [ -n "${BUILD_IN_BUILD}" ] && [ ! -d build ]; then
+  	mkdir build
+  fi
+  if [ -f autogen.sh ]; then
+    ./autogen.sh
+  fi
+  if [ -n "${BUILD_IN_BUILD}" ]; then
+    cd build
+  fi
+}
+
+
+
+# Unless SIGROK_INCREMENTAL is set, erase previous build
+# $1: Path of the build directory 
+CreateBuildDir() {
+
+  local BUILDDIR="$1"
+
+  if [ -z "${SIGROK_INCREMENTAL}" ]; then
+    rm -rf $BUILDDIR
+  fi
+  # Create a new build dir if it does not exists
+  if [ ! -d $BUILDDIR ]; then
+    $ECHO "starting new build directory: $BUILDDIR"
+    mkdir $BUILDDIR
+  fi
+  cd $BUILDDIR
+}
