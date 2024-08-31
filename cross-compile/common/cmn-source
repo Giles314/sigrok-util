@@ -1,0 +1,203 @@
+#!/bin/sh
+##
+## This file is part of the sigrok-util project.
+##
+## Copyright (C) 2024 Giles314 <pch@laposte.net>
+##
+## This program is free software; you can redistribute it and/or modify
+## it under the terms of the GNU General Public License as published by
+## the Free Software Foundation; either version 2 of the License, or
+## (at your option) any later version.
+##
+## This program is distributed in the hope that it will be useful,
+## but WITHOUT ANY WARRANTY; without even the implied warranty of
+## MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+## GNU General Public License for more details.
+##
+## You should have received a copy of the GNU General Public License
+## along with this program; if not, see <http://www.gnu.org/licenses/>.
+##
+
+## .cmn-source must be sourced in the different build scripts
+## It defines a function that helps working with forked repositories
+## By exporting SIGROK_REPO_BASEURL defining
+## the root of these repositories, this function fetches
+## ${SIGROK_REPO_BASEURL}/${repo-name} repository instead of
+## git://sigrok.org/${repo-name}
+## If the forked repository does not exist falls back to sigrok repo.
+
+## It also add a capability to configue incremental building
+## This mode does not try to rebuild all but just to build what has failed
+
+echo "Loading utility functions from .cmn-sources"
+
+# LoadConfigureAndMake perform the initial and common part of getting and compiling a repository
+# The repository component generation specificities must follow the call to this procedure
+# $1: The repository short name
+# $2: Optional GIT version
+# Variable MAKE_OPTIONS provides options for make (typically the prefix)
+# Variable VERBOSE_OPTIONS provides make with definition of VERBOSE level
+# Variable SUB_BUILD_DIR provides the relative path (from the repository base) to the directory where the build will be performed
+# Define the following variable:
+#  REPO_DIR : repository base directory absolute path 
+LoadConfigureAndMake() {
+
+  local repo_name="$1"
+  local git_branch="$2"
+  USE_CMAKE=""
+  if [ "${git_branch}" = "-" ]; then
+    git_branch="$3"
+    USE_CMAKE="yes"
+  else
+    if [ "$3" = "-" ]; then
+      USE_CMAKE="yes"
+    fi
+  fi
+
+  local install_make_file=config.install.make
+  local repo_base_url="${SIGROK_REPO_BASEURL:-${REPO_BASE}}"
+  local repo_url="${repo_base_url}/${repo_name}"
+  local is_new_repo=0
+
+  if [ -t 1 ] ; then echo -e -n "\033[92m" ; fi
+  echo "Component ${repo_name}"
+  if [ -t 1 ] ; then echo -e -n "\033[0m" ;fi
+  
+  # Avoid GIT to prompt for credentials (all repo must be reachable without user entry)
+  export GIT_TERMINAL_PROMPT=0
+  # Check whether the computed URL is a valid GIT repository
+  if ! git ls-remote "${repo_url}" <&- >/dev/null 2>&1 ; then
+	  # If not, if it wasn't the default repository fall back to default
+	  # (This allows to have only few local repositories keeping default for others)
+    if [ ! "${repo_base_url}" = "${REPO_BASE}" ]; then
+	    echo "The repository ${repo_url} does not exist use default ${REPO_BASE}"
+		  repo_url="${REPO_BASE}/${repo_name}"
+	  fi
+  else
+    # The repository exists
+    # Is it the default one
+    if [ ! "${repo_base_url}" = "${REPO_BASE}" ]; then
+      # We will work with a development repository, ignore the specific tag if any
+      git_branch=
+    fi
+  fi
+  
+  # Verify whether the directory is already a Git repository
+  if [ -d "${repo_name}/.git" ]; then
+    # Get the local Git Repository's remote repository URL
+    cd ${repo_name}
+    local remote_url=$(git remote get-url origin 2>/dev/null)
+
+    # This is matching expected repository
+    if [ "$remote_url" = "$repo_url" ]; then
+      if [ -n "$git_branch" ]; then
+        # If a specific tag is expected verify whether this is the right one
+        local describe_result=$(git describe --tags)
+        # Trim white spaces
+        describe_result="${describe_result#"${describe_result%%[![:space:]]*}"}"
+        if [ ! "${describe_result}" = "${git_branch}" ]; then
+          echo -e  "\033[33mTag '${git_branch}' does match for '${repo_name}'.\033[0m"
+          exit 1
+        fi
+      else
+        # No specific tag has been specified, verify we are at HEAD
+        # Do a fech operation to check whether a new change has been missed
+        local fetch_result=$(git fetch origin)
+        # Trim any white spaces 
+        fetch_result="${fetch_result#"${fetch_result%%[![:space:]]*}"}"
+        if [ -n "$fetch_result" ]; then
+          echo -e "\033[33mNew changes exist in repository '${repo_name}'.\033[0m"
+          exit 1
+        fi
+      fi
+    else
+      echo "The directory '${repo_name}' contains a clone of '${remote_url}' instead of '${repo_url}'"
+      exit 1
+    fi
+  else
+    if [ -d ${repo_name} ]; then
+      rm -rf ${repo_name}
+    fi
+    # Clone the repository and add its build directory
+    if [ -n "${git_branch}" ]; then
+      # if tag is specified construct command complement to get that tag and not raising annoying warning
+      git_branch="-b $git_branch  -c advice.detachedHead=false"
+    fi
+    echo "${GIT_CLONE} \"$repo_url\" \"${git_branch}\""
+    ${GIT_CLONE} "$repo_url" ${git_branch}
+    cd ${repo_name}
+  fi
+
+  export REPO_DIR="$(pwd)"
+  export BUILD_DIR="${REPO_DIR}/${SUB_BUILD_DIR}"
+  if [ ! -f Makefile ] && [ ! -f "${BUILDBASE}/Makefile" ]; then
+    if [ -f configure.ac ]; then
+      autoreconf --force --install --verbose "${REPO_DIR}"
+      ./configure ${CONFIG_OPTIONS}
+
+    else
+      if [ -f CMakeLists.txt ]; then
+        [ -d build ] || mkdir "${BUILDBASE}"
+        cd build
+        PKG_CONFIG_PATH=$P 
+        pwd
+        cmake \
+          -G "Unix Makefiles" \
+          -DCMAKE_INSTALL_PREFIX:PATH=$PREFIX \
+          -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+          -DDISABLE_WERROR=y \
+          -DENABLE_TESTS=n \
+          ..
+      else
+        echo "No configure.ac for autoreconf, nor CMakeFile.txt for cmake, don't know how to create makefile."
+        exit 1
+      fi
+    fi
+  else
+    if [ ! -f Makefile ]; then
+      cd ${BUILDBASE}
+    fi
+  fi
+
+  make  ${MAKE_OPTIONS} ${VERBOSE_OPTIONS}
+  if [ -n "${INSTALL_RULE}" ]; then
+    local all_targets="all:"
+    echo $INSTALL_RULE > $install_make_file
+    all_targets="${all_targets} ${INSTALL_RULE%:*}"
+    echo -e "\tmake  install  ${VERBOSE_OPTIONS}" >> $install_make_file
+    echo >> ${install_make_file}
+    echo $all_targets >> $install_make_file
+    echo ".PHONY: all" >> $install_make_file
+    INSTALL_RULE=
+    make -f $install_make_file all ${VERBOSE_OPTIONS}
+  fi
+  cd ${ROOT_BUILD_DIR}
+}
+
+
+
+# Unless SIGROK_INCREMENTAL is set, erase previous build
+# When called current directory must be the current directory at script calling time 
+# $1: Path of the build directory (may be relative path to current directory)
+# Define 2 directories:
+# BUILD_SCRIPT_DIR : The directory where is located the sigrok build script
+#                    (depends on the build "cross-compile" type)
+# ROOT_BUILD_DIR   : The root directory where sigrok will be built
+#                    The different GIT sub-repositories are cloned there
+CreateBuildDir() {
+
+  local BUILDDIR="$1"
+
+  export BUILD_SCRIPT_DIR="$(pwd)"
+
+  if [ -z "${SIGROK_INCREMENTAL}" ]; then
+    rm -rf $BUILDDIR
+  fi
+  # Create a new build dir if it does not exists
+  if [ ! -d "${BUILDDIR}" ]; then
+    echo "starting new build directory: ${BUILDDIR}"
+    mkdir "${BUILDDIR}"
+  fi
+  cd "${BUILDDIR}"
+  export ROOT_BUILD_DIR="$(pwd)"
+}

@@ -1,3 +1,4 @@
-build/
+build*
 firmware/kingst-la/*.bitstream
 firmware/kingst-la/*.fw
+/cross-compile/.vscode
